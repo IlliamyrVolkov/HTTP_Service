@@ -2,11 +2,10 @@ from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Query
 from sqlalchemy.orm import Session
 from datetime import date
 import pandas as pd
-from sqlalchemy import func
+
 
 from app.database import get_db
 from app.models import Credit, Payment, Plan, Dictionary
-from app.schemas import PlanResponse
 
 router = APIRouter()
 
@@ -28,7 +27,7 @@ async def insert_plans(file: UploadFile = File(...), db: Session = Depends(get_d
 
         if period.day != 1:
             raise HTTPException(status_code=400,
-                                detail=f'The plan date in line {index} is not the first day of the month')
+                                detail=f'The plan date in the {index} line is not the first day of the month')
 
         category = db.query(Dictionary).filter(Dictionary.name == category_name).first()
         if not category:
@@ -39,7 +38,12 @@ async def insert_plans(file: UploadFile = File(...), db: Session = Depends(get_d
             raise HTTPException(status_code=400,
                                 detail=f'A plan with this month and category already exists (line {index})')
 
-        new_plan = Plan(period=period, sum=plan_sum, category_id=category.id)
+        new_plan = Plan(
+            period=period,
+            sum=plan_sum,
+            category_id=int(category.id.__clause_element__().value)
+
+        )
         db.add(new_plan)
 
     db.commit()
@@ -57,11 +61,11 @@ async def plans_performance(
         start_date = plan.period
 
         if category_name.lower() == 'видача':
-            credits = db.query(Credit).filter(Credit.issuance_date >= start_date, Credit.issuance_date <= as_of).all()
-            actual_sum = sum(c.body for c in credits)
+            issued_credits = db.query(Credit).filter(Credit.issuance_date.between(start_date, as_of)).all()
+            actual_sum = sum(c.body for c in issued_credits)
         elif category_name.lower() == 'збір':
-            payments = db.query(Payment).filter(Payment.payment_date >= start_date, Payment.payment_date <= as_of).all()
-            actual_sum = sum(p.sum for p in payments)
+            received_payments = db.query(Payment).filter(Payment.payment_date.between(start_date, as_of)).all()
+            actual_sum = sum(p.sum for p in received_payments)
         else:
             actual_sum = 0
 
@@ -78,27 +82,32 @@ async def plans_performance(
 
 @router.get("/year_performance")
 async def year_performance(year: int, db: Session = Depends(get_db)):
+    from sqlalchemy import func
     results = []
+
     for month in range(1, 13):
         start_date = date(year, month, 1)
-        end_date = date(year, month + 1, 1) if month < 12 else date(year + 1, 1, 1)
+        if month == 12:
+            end_date = date(year + 1, 1, 1)
+        else:
+            end_date = date(year, month + 1, 1)
 
-        credits_count = db.query(func.count(Credit.id)).filter(
-            Credit.issuance_date.between(start_date, end_date)).scalar() or 0
-        plan_issue_sum = db.query(func.sum(Plan.sum)).join(Dictionary).filter(Plan.period == start_date,
-                                                                              Dictionary.name.ilike(
-                                                                                  '%видача%')).scalar() or 0
-        actual_issue_sum = db.query(func.sum(Credit.body)).filter(
-            Credit.issuance_date.between(start_date, end_date)).scalar() or 0
+        credits_count = db.query(func.count(Credit.id)).filter(Credit.issuance_date >= start_date,
+                                                               Credit.issuance_date < end_date).scalar() or 0
+        plan_issue_sum = db.query(func.sum(Plan.sum)) \
+                             .join(Dictionary, Plan.category_id == Dictionary.id) \
+                             .filter(Plan.period.is_(start_date), Dictionary.name.ilike('%видача%')).scalar() or 0
+        actual_issue_sum = db.query(func.sum(Credit.body)).filter(Credit.issuance_date >= start_date,
+                                                                  Credit.issuance_date < end_date).scalar() or 0
         performance_issue = (actual_issue_sum / plan_issue_sum * 100) if plan_issue_sum > 0 else 0
 
-        payments_count = db.query(func.count(Payment.id)).filter(
-            Payment.payment_date.between(start_date, end_date)).scalar() or 0
-        plan_collection_sum = db.query(func.sum(Plan.sum)).join(Dictionary).filter(Plan.period == start_date,
-                                                                                   Dictionary.name.ilike(
-                                                                                       '%збір%')).scalar() or 0
-        actual_collection_sum = db.query(func.sum(Payment.sum)).filter(
-            Payment.payment_date.between(start_date, end_date)).scalar() or 0
+        payments_count = db.query(func.count(Payment.id)).filter(Payment.payment_date >= start_date,
+                                                                 Payment.payment_date < end_date).scalar() or 0
+        plan_collection_sum = db.query(func.sum(Plan.sum)) \
+                                  .join(Dictionary) \
+                                  .filter(Plan.period.is_(start_date), Dictionary.name.ilike('%збір%')).scalar() or 0
+        actual_collection_sum = db.query(func.sum(Payment.sum)).filter(Payment.payment_date >= start_date,
+                                                                       Payment.payment_date < end_date).scalar() or 0
         performance_collection = (actual_collection_sum / plan_collection_sum * 100) if plan_collection_sum > 0 else 0
 
         results.append({
