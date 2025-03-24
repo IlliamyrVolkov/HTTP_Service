@@ -13,7 +13,7 @@ router = APIRouter()
 @router.post("/insert")
 async def insert_plans(file: UploadFile = File(...), db: Session = Depends(get_db)):
     try:
-        df = pd.read_csv(file.file, delimiter='\t')
+        df = pd.read_excel(file.file)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f'Unable to read the file: {e}')
 
